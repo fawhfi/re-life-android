@@ -21,6 +21,9 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.activity.ComponentActivity;
+import androidx.activity.OnBackPressedCallback;
+
 import com.relife.mobile.offline.OfflineQueueStore;
 import com.relife.mobile.offline.SyncScheduler;
 import com.relife.mobile.sandbox.SandboxAgent;
@@ -36,7 +39,7 @@ import java.security.MessageDigest;
 import java.util.Locale;
 import java.util.UUID;
 
-public final class MainActivity extends android.app.Activity {
+public final class MainActivity extends ComponentActivity {
     private WebView webView;
     private OfflineQueueStore offlineStore;
     private boolean offlinePageShown;
@@ -54,6 +57,16 @@ public final class MainActivity extends android.app.Activity {
         webView = new WebView(this);
         setContentView(webView);
         configureWebView();
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                if (webView.canGoBack()) {
+                    webView.goBack();
+                    return;
+                }
+                setEnabled(false);
+                getOnBackPressedDispatcher().onBackPressed();
+            }
+        });
         playIntegrityClient = new PlayIntegrityClient(this);
         if (NetworkState.isOnline(this)) {
             playIntegrityClient.requestToken(new PlayIntegrityClient.Callback() {
@@ -124,10 +137,6 @@ public final class MainActivity extends android.app.Activity {
     @Override protected void onSaveInstanceState(Bundle out) {
         webView.saveState(out);
         super.onSaveInstanceState(out);
-    }
-
-    @Override public void onBackPressed() {
-        if (webView.canGoBack()) webView.goBack(); else super.onBackPressed();
     }
 
     private void showOfflinePage() {

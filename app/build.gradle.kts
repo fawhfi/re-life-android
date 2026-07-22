@@ -68,6 +68,7 @@ android.sourceSets.getByName("main").assets.srcDir(generatedRelAssets.get().asFi
 tasks.named("preBuild").configure { dependsOn(syncRelWebAssets) }
 
 dependencies {
+    implementation("androidx.activity:activity:1.10.1")
     implementation("com.google.android.play:integrity:1.4.0")
     testImplementation("junit:junit:4.13.2")
 }
