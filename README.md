@@ -13,7 +13,7 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 .\gradlew.bat assembleDebug
 ```
 
-預設伺服器是 `https://relifeapp.com`。本機開發可覆蓋：
+預設伺服器是 canonical origin `https://www.relifeapp.com`，避免裸網域重新導向時被 WebView 當成外部網站而開啟系統瀏覽器。本機開發可覆蓋：
 
 ```powershell
 .\gradlew.bat -PREL_SERVER_URL=http://10.0.2.2:8000 assembleDebug

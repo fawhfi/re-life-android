@@ -5,7 +5,7 @@ plugins {
 }
 
 val relServerUrl = providers.gradleProperty("REL_SERVER_URL")
-    .orElse("https://relifeapp.com")
+    .orElse("https://www.relifeapp.com")
     .map { it.trimEnd('/') }
 val playCloudProjectNumber = providers.gradleProperty("REL_PLAY_CLOUD_PROJECT_NUMBER")
     .orElse("0")

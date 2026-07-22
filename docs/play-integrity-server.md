@@ -9,7 +9,7 @@ Android 客户端只负责取得并转发 Play Integrity token；它不能自行
 ```powershell
 .\gradlew.bat `
   -PREL_PLAY_CLOUD_PROJECT_NUMBER=1234567890 `
-  -PREL_PLAY_CHALLENGE_URL=https://relifeapp.com/api/integrity/challenge `
+  -PREL_PLAY_CHALLENGE_URL=https://www.relifeapp.com/api/integrity/challenge `
   assembleRelease
 ```
 
