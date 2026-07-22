@@ -1,0 +1,245 @@
+package com.relife.mobile;
+
+import android.Manifest;
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.os.Bundle;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.ServiceWorkerClient;
+import android.webkit.ServiceWorkerController;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+
+import com.relife.mobile.offline.OfflineQueueStore;
+import com.relife.mobile.offline.SyncScheduler;
+import com.relife.mobile.sandbox.SandboxAgent;
+
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+
+public final class MainActivity extends android.app.Activity {
+    private WebView webView;
+    private OfflineQueueStore offlineStore;
+    private boolean offlinePageShown;
+    private String pendingFileCallback;
+    private String pendingGeolocationOrigin;
+    private android.webkit.GeolocationPermissions.Callback pendingGeolocationCallback;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        offlineStore = new OfflineQueueStore(this);
+        webView = new WebView(this);
+        setContentView(webView);
+        configureWebView();
+        if (state == null) webView.loadUrl(BuildConfig.REL_SERVER_URL + "/");
+        else webView.restoreState(state);
+    }
+
+    private void configureWebView() {
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        settings.setMediaPlaybackRequiresUserGesture(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        CookieManager.getInstance().setAcceptCookie(true);
+        webView.addJavascriptInterface(new RelifeNativeBridge(this), "RelifeNative");
+        webView.setWebViewClient(new RelifeWebViewClient());
+        webView.setWebChromeClient(new RelifeChromeClient());
+        ServiceWorkerController.getInstance().setServiceWorkerClient(new ServiceWorkerClient() {
+            @Override public WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
+                return intercept(request.getUrl().toString(), request.getMethod());
+            }
+        });
+    }
+
+    @Override public boolean onCreateOptionsMenu(Menu menu) {
+        menu.add("Agent 權限").setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
+        return true;
+    }
+
+    @Override public boolean onOptionsItemSelected(MenuItem item) {
+        if ("Agent 權限".contentEquals(item.getTitle())) {
+            showAgentPermissions();
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+
+    private void showAgentPermissions() {
+        String[] labels = {"讀取 App 沙箱檔案", "寫入 App 沙箱檔案", "查看裝置基本資訊"};
+        String[] keys = {"READ_FILES", "WRITE_FILES", "DEVICE_INFO"};
+        boolean[] checked = new boolean[keys.length];
+        for (int i = 0; i < keys.length; i++) checked[i] = SandboxAgent.isGranted(this, keys[i]);
+        new AlertDialog.Builder(this)
+                .setTitle("手機端 Agent 權限")
+                .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) ->
+                        SandboxAgent.setGranted(this, keys[which], isChecked))
+                .setMessage("Agent 永遠只能存取本 App 私有 sandbox 目錄；不提供 shell、通訊錄或其他 App 資料權限。")
+                .setPositiveButton("完成", null)
+                .show();
+    }
+
+    @Override protected void onSaveInstanceState(Bundle out) {
+        webView.saveState(out);
+        super.onSaveInstanceState(out);
+    }
+
+    @Override public void onBackPressed() {
+        if (webView.canGoBack()) webView.goBack(); else super.onBackPressed();
+    }
+
+    private void showOfflinePage() {
+        if (offlinePageShown) return;
+        offlinePageShown = true;
+        try (InputStream stream = getAssets().open("templates/index.html")) {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            int count;
+            while ((count = stream.read(chunk)) >= 0) output.write(chunk, 0, count);
+            byte[] bytes = output.toByteArray();
+            String html = new String(bytes, StandardCharsets.UTF_8);
+            html = html.replace("</head>", "<script>" + OfflineBridgeScript.SCRIPT + "</script></head>");
+            webView.loadDataWithBaseURL(BuildConfig.REL_SERVER_URL, html, "text/html", "UTF-8", BuildConfig.REL_SERVER_URL + "/");
+        } catch (IOException ignored) {
+            webView.loadData("<h1>Re-Life 暫時無法連線</h1><p>請恢復網路後重試。</p>", "text/html", "UTF-8");
+        }
+    }
+
+    private WebResourceResponse intercept(String urlString, String method) {
+        Uri uri = Uri.parse(urlString);
+        if (!"GET".equalsIgnoreCase(method)) return null;
+        String path = uri.getPath();
+        if (path == null || !path.startsWith("/static/")) return null;
+        String assetPath = path.substring(1);
+        try {
+            InputStream stream = getAssets().open(assetPath);
+            return new WebResourceResponse(mimeFor(assetPath), "UTF-8", stream);
+        } catch (IOException ignored) { return null; }
+    }
+
+    private static String mimeFor(String path) {
+        String lower = path.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".css")) return "text/css";
+        if (lower.endsWith(".js")) return "application/javascript";
+        if (lower.endsWith(".json")) return "application/json";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".svg")) return "image/svg+xml";
+        if (lower.endsWith(".woff2")) return "font/woff2";
+        return "application/octet-stream";
+    }
+
+    private final class RelifeWebViewClient extends WebViewClient {
+        @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+            return intercept(request.getUrl().toString(), request.getMethod());
+        }
+
+        @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+            Uri uri = request.getUrl();
+            String configuredOrigin = Uri.parse(BuildConfig.REL_SERVER_URL).getScheme() + "://" + Uri.parse(BuildConfig.REL_SERVER_URL).getAuthority();
+            String requestOrigin = uri.getScheme() + "://" + uri.getAuthority();
+            if (configuredOrigin.equalsIgnoreCase(requestOrigin) || uri.getHost() == null) return false;
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+            return true;
+        }
+
+        @Override public void onPageFinished(WebView view, String url) {
+            offlinePageShown = url.startsWith("file:") || url.startsWith("data:");
+            installOfflineBridge(view);
+        }
+
+        @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+            if (request.isForMainFrame()) showOfflinePage();
+        }
+    }
+
+    private void installOfflineBridge(WebView view) {
+        String script = OfflineBridgeScript.SCRIPT;
+        view.evaluateJavascript(script, null);
+    }
+
+    private final class RelifeChromeClient extends WebChromeClient {
+        @Override public void onGeolocationPermissionsShowPrompt(String origin, android.webkit.GeolocationPermissions.Callback callback) {
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                    || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                callback.invoke(origin, true, false);
+                return;
+            }
+            pendingGeolocationOrigin = origin;
+            pendingGeolocationCallback = callback;
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, 742);
+        }
+
+        @Override public boolean onShowFileChooser(WebView view, android.webkit.ValueCallback<Uri[]> callback, FileChooserParams params) {
+            pendingFileCallback = "callback";
+            Intent intent = params.createIntent();
+            intent.setType("image/*");
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false);
+            startActivityForResult(intent, 741);
+            FileCallbackHolder.callback = callback;
+            return true;
+        }
+    }
+
+    private static final class FileCallbackHolder { static android.webkit.ValueCallback<Uri[]> callback; }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != 741 || FileCallbackHolder.callback == null) return;
+        Uri result = resultCode == RESULT_OK && data != null ? data.getData() : null;
+        FileCallbackHolder.callback.onReceiveValue(result == null ? null : new Uri[]{result});
+        FileCallbackHolder.callback = null;
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != 742 || pendingGeolocationCallback == null) return;
+        boolean granted = false;
+        for (int grantResult : grantResults) granted |= grantResult == PackageManager.PERMISSION_GRANTED;
+        pendingGeolocationCallback.invoke(pendingGeolocationOrigin, granted, false);
+        pendingGeolocationOrigin = null;
+        pendingGeolocationCallback = null;
+    }
+
+    public final class RelifeNativeBridge {
+        private final Context context;
+        RelifeNativeBridge(Context context) { this.context = context.getApplicationContext(); }
+
+        @JavascriptInterface public boolean isOnline() { return NetworkState.isOnline(context); }
+        @JavascriptInterface public String getCookie() { return CookieManager.getInstance().getCookie(BuildConfig.REL_SERVER_URL); }
+        @JavascriptInterface public String enqueueMutation(String method, String path, String body) {
+            if (!com.relife.mobile.offline.OfflinePolicy.canQueue(method, path)) return "";
+            if (body != null && body.length() > 3_000_000) return "";
+            String id = offlineStore.enqueue(method, path, body, getCookie());
+            SyncScheduler.runSoon(context);
+            return id;
+        }
+        @JavascriptInterface public void clearOfflineData() { offlineStore.clear(); }
+        @JavascriptInterface public void syncNow() { SyncScheduler.runSoon(context); }
+        @JavascriptInterface public void cachePut(String key, String body) { if (key != null && body != null && body.length() < 2_000_000) offlineStore.cachePut(key, body); }
+        @JavascriptInterface public String cacheGet(String key) { return offlineStore.cacheGet(key); }
+        @JavascriptInterface public String agent(String command) { return SandboxAgent.execute(context, command); }
+    }
+}
