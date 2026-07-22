@@ -7,6 +7,10 @@ plugins {
 val relServerUrl = providers.gradleProperty("REL_SERVER_URL")
     .orElse("https://relifeapp.com")
     .map { it.trimEnd('/') }
+val playCloudProjectNumber = providers.gradleProperty("REL_PLAY_CLOUD_PROJECT_NUMBER")
+    .orElse("0")
+val playChallengeUrl = providers.gradleProperty("REL_PLAY_CHALLENGE_URL")
+    .orElse("")
 
 android {
     namespace = "com.relife.mobile"
@@ -24,6 +28,8 @@ android {
         versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "REL_SERVER_URL", "\"${relServerUrl.get()}\"")
+        buildConfigField("String", "REL_PLAY_CLOUD_PROJECT_NUMBER", "\"${playCloudProjectNumber.get()}\"")
+        buildConfigField("String", "REL_PLAY_CHALLENGE_URL", "\"${playChallengeUrl.get()}\"")
     }
 
     buildFeatures {
@@ -62,5 +68,6 @@ android.sourceSets.getByName("main").assets.srcDir(generatedRelAssets.get().asFi
 tasks.named("preBuild").configure { dependsOn(syncRelWebAssets) }
 
 dependencies {
+    implementation("com.google.android.play:integrity:1.4.0")
     testImplementation("junit:junit:4.13.2")
 }

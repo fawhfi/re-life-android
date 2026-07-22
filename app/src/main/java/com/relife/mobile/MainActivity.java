@@ -26,20 +26,26 @@ import com.relife.mobile.offline.SyncScheduler;
 import com.relife.mobile.sandbox.SandboxAgent;
 
 import org.json.JSONObject;
+import org.json.JSONException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Locale;
+import java.util.UUID;
 
 public final class MainActivity extends android.app.Activity {
     private WebView webView;
     private OfflineQueueStore offlineStore;
     private boolean offlinePageShown;
+    private boolean mainPageStarted;
     private String pendingFileCallback;
     private String pendingGeolocationOrigin;
     private android.webkit.GeolocationPermissions.Callback pendingGeolocationCallback;
+    private final String bridgeToken = UUID.randomUUID().toString();
+    private PlayIntegrityClient playIntegrityClient;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -48,6 +54,20 @@ public final class MainActivity extends android.app.Activity {
         webView = new WebView(this);
         setContentView(webView);
         configureWebView();
+        playIntegrityClient = new PlayIntegrityClient(this);
+        if (NetworkState.isOnline(this)) {
+            playIntegrityClient.requestToken(new PlayIntegrityClient.Callback() {
+                @Override public void onToken(String token) { loadMainPage(state); }
+                @Override public void onUnavailable(String reason) { loadMainPage(state); }
+            });
+        } else {
+            loadMainPage(state);
+        }
+    }
+
+    private void loadMainPage(Bundle state) {
+        if (mainPageStarted || webView == null) return;
+        mainPageStarted = true;
         if (state == null) webView.loadUrl(BuildConfig.REL_SERVER_URL + "/");
         else webView.restoreState(state);
     }
@@ -120,7 +140,7 @@ public final class MainActivity extends android.app.Activity {
             while ((count = stream.read(chunk)) >= 0) output.write(chunk, 0, count);
             byte[] bytes = output.toByteArray();
             String html = new String(bytes, StandardCharsets.UTF_8);
-            html = html.replace("</head>", "<script>" + OfflineBridgeScript.SCRIPT + "</script></head>");
+            html = html.replace("</head>", "<script>" + OfflineBridgeScript.SCRIPT.replace("__RELIFE_BRIDGE_TOKEN__", bridgeToken) + "</script></head>");
             webView.loadDataWithBaseURL(BuildConfig.REL_SERVER_URL, html, "text/html", "UTF-8", BuildConfig.REL_SERVER_URL + "/");
         } catch (IOException ignored) {
             webView.loadData("<h1>Re-Life 暫時無法連線</h1><p>請恢復網路後重試。</p>", "text/html", "UTF-8");
@@ -129,6 +149,8 @@ public final class MainActivity extends android.app.Activity {
 
     private WebResourceResponse intercept(String urlString, String method) {
         Uri uri = Uri.parse(urlString);
+        Uri configured = Uri.parse(BuildConfig.REL_SERVER_URL);
+        if (uri.getHost() != null && !String.valueOf(configured.getHost()).equalsIgnoreCase(uri.getHost())) return null;
         if (!"GET".equalsIgnoreCase(method)) return null;
         String path = uri.getPath();
         if (path == null || !path.startsWith("/static/")) return null;
@@ -167,7 +189,7 @@ public final class MainActivity extends android.app.Activity {
 
         @Override public void onPageFinished(WebView view, String url) {
             offlinePageShown = url.startsWith("file:") || url.startsWith("data:");
-            installOfflineBridge(view);
+            if (isTrustedPage(url)) installOfflineBridge(view);
         }
 
         @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
@@ -176,8 +198,17 @@ public final class MainActivity extends android.app.Activity {
     }
 
     private void installOfflineBridge(WebView view) {
-        String script = OfflineBridgeScript.SCRIPT;
+        String script = OfflineBridgeScript.SCRIPT.replace("__RELIFE_BRIDGE_TOKEN__", bridgeToken);
         view.evaluateJavascript(script, null);
+    }
+
+    private boolean isTrustedPage(String url) {
+        if (url == null) return false;
+        if (url.startsWith("data:")) return true;
+        Uri candidate = Uri.parse(url);
+        Uri configured = Uri.parse(BuildConfig.REL_SERVER_URL);
+        return String.valueOf(candidate.getScheme()).equalsIgnoreCase(String.valueOf(configured.getScheme()))
+                && String.valueOf(candidate.getAuthority()).equalsIgnoreCase(String.valueOf(configured.getAuthority()));
     }
 
     private final class RelifeChromeClient extends WebChromeClient {
@@ -226,20 +257,81 @@ public final class MainActivity extends android.app.Activity {
     public final class RelifeNativeBridge {
         private final Context context;
         RelifeNativeBridge(Context context) { this.context = context.getApplicationContext(); }
+        private boolean authorized(String candidate) { return bridgeToken.equals(candidate); }
 
-        @JavascriptInterface public boolean isOnline() { return NetworkState.isOnline(context); }
-        @JavascriptInterface public String getCookie() { return CookieManager.getInstance().getCookie(BuildConfig.REL_SERVER_URL); }
-        @JavascriptInterface public String enqueueMutation(String method, String path, String body) {
+        @JavascriptInterface public boolean isOnline(String token) { return authorized(token) && NetworkState.isOnline(context); }
+        @JavascriptInterface public String integrityHeader(String token) { return authorized(token) ? AppIntegrity.header(context) : ""; }
+        @JavascriptInterface public String playIntegrityToken(String token) { return authorized(token) ? playIntegrityClient.currentToken() : ""; }
+        @JavascriptInterface public String playIntegrityNonce(String token) { return authorized(token) ? playIntegrityClient.currentNonce() : ""; }
+        @JavascriptInterface public String playIntegrityAction(String token) { return authorized(token) ? playIntegrityClient.currentAction() : ""; }
+        @JavascriptInterface public boolean refreshPlayIntegrity(String token, String action) {
+            if (!authorized(token)) return false;
+            String normalized = action == null ? "" : action.trim();
+            if (!("reward_redeem".equals(normalized) || "prove_swap".equals(normalized))) return false;
+            playIntegrityClient.requestToken(normalized, new PlayIntegrityClient.Callback() {
+                @Override public void onToken(String ignored) {}
+                @Override public void onUnavailable(String ignored) {}
+            });
+            return true;
+        }
+        @JavascriptInterface public String getCookie(String token) { return authorized(token) ? CookieManager.getInstance().getCookie(BuildConfig.REL_SERVER_URL) : ""; }
+        @JavascriptInterface public String enqueueMutation(String token, String method, String path, String body) {
+            if (!authorized(token)) return "";
             if (!com.relife.mobile.offline.OfflinePolicy.canQueue(method, path)) return "";
+            if ("PATCH".equalsIgnoreCase(method) && "/api/users/me".equals(path)) {
+                body = sanitizeProfileBody(body);
+            }
             if (body != null && body.length() > 3_000_000) return "";
-            String id = offlineStore.enqueue(method, path, body, getCookie());
+            String id = offlineStore.enqueue(method, path, body, getCookie(token));
             SyncScheduler.runSoon(context);
             return id;
         }
-        @JavascriptInterface public void clearOfflineData() { offlineStore.clear(); }
-        @JavascriptInterface public void syncNow() { SyncScheduler.runSoon(context); }
-        @JavascriptInterface public void cachePut(String key, String body) { if (key != null && body != null && body.length() < 2_000_000) offlineStore.cachePut(key, body); }
-        @JavascriptInterface public String cacheGet(String key) { return offlineStore.cacheGet(key); }
-        @JavascriptInterface public String agent(String command) { return SandboxAgent.execute(context, command); }
+        @JavascriptInterface public void clearOfflineData(String token) { if (authorized(token)) offlineStore.clear(); }
+        @JavascriptInterface public void syncNow(String token) { if (authorized(token)) SyncScheduler.runSoon(context); }
+        @JavascriptInterface public void cachePut(String token, String key, String body) {
+            if (authorized(token) && key != null && body != null && body.length() < 2_000_000) {
+                offlineStore.cachePut(cacheKey(token, key), body);
+            }
+        }
+        @JavascriptInterface public String cacheGet(String token, String key) {
+            return authorized(token) && key != null ? offlineStore.cacheGet(cacheKey(token, key)) : null;
+        }
+        @JavascriptInterface public String agent(String token, String command) { return authorized(token) ? SandboxAgent.execute(context, command) : "{\"error\":\"BRIDGE_UNAUTHORIZED\"}"; }
+
+        private String sanitizeProfileBody(String body) {
+            try {
+                JSONObject input = new JSONObject(body == null ? "{}" : body);
+                JSONObject output = new JSONObject();
+                copyString(input, output, "photo_url");
+                copyString(input, output, "photoUrl");
+                return output.toString();
+            } catch (JSONException ignored) {
+                return "";
+            }
+        }
+
+        private void copyString(JSONObject input, JSONObject output, String key) throws JSONException {
+            if (input.has(key) && !input.isNull(key)) {
+                String value = input.optString(key, "");
+                if (value.length() <= 2_000) output.put(key, value);
+            }
+        }
+
+        private String cacheKey(String token, String key) {
+            String cookie = CookieManager.getInstance().getCookie(BuildConfig.REL_SERVER_URL);
+            return "session:" + sha256(cookie == null ? "" : cookie) + "/" + key;
+        }
+
+        private String sha256(String value) {
+            try {
+                byte[] digest = MessageDigest.getInstance("SHA-256")
+                        .digest(value.getBytes(StandardCharsets.UTF_8));
+                StringBuilder result = new StringBuilder(digest.length * 2);
+                for (byte item : digest) result.append(String.format(Locale.ROOT, "%02x", item));
+                return result.toString();
+            } catch (Exception ignored) {
+                return "unavailable";
+            }
+        }
     }
 }

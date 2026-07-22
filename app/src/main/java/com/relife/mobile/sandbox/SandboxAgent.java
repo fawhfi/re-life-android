@@ -94,7 +94,14 @@ public final class SandboxAgent {
     private static Path resolve(Path root, String relative) throws IOException {
         if (!SandboxPolicy.isInside(root, relative)) throw new SecurityException("outside sandbox");
         Path path = root.resolve(relative).normalize();
-        if (Files.exists(path) && Files.isSymbolicLink(path)) throw new SecurityException("symlink");
+        // Reject a symlink at any existing path component. Checking only the
+        // final file would allow "linked-dir/new-file" to escape the root.
+        Path current = root;
+        if (Files.isSymbolicLink(current)) throw new SecurityException("symlink root");
+        for (Path component : root.relativize(path)) {
+            current = current.resolve(component);
+            if (Files.isSymbolicLink(current)) throw new SecurityException("symlink component");
+        }
         return path;
     }
 

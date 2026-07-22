@@ -1,3 +1,3 @@
--keepclassmembers class com.relife.mobile.web.** {
+-keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }
