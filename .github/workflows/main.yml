@@ -3,8 +3,6 @@ name: Build APK
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
@@ -25,12 +23,21 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build APK
+      - name: Build Unsigned Release APK
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Upload APK Artifact
+      - name: Sign APK
+        uses: r2da/android-sign-apk@v1
+        with:
+          apk-path: app/build/outputs/apk/release/*.apk
+          keystore-base64: ${{ secrets.KEYSTORE_BASE64 }}
+          keystore-password: ${{ secrets.KEYSTORE_PASSWORD }}
+          key-alias: ${{ secrets.KEY_ALIAS }}
+          key-password: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Upload Signed APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: app/build/outputs/apk/release/*.apk
+          name: app-release-signed
+          path: app/build/outputs/apk/release/*-signed.apk
           retention-days: 7
