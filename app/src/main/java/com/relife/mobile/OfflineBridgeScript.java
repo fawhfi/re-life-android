@@ -10,7 +10,41 @@ public final class OfflineBridgeScript {
           if (!nativeBridge) return;
           window.__RELIFE_NATIVE_BRIDGE__ = true;
           const bridgeToken = '__RELIFE_BRIDGE_TOKEN__';
+          const androidInteractionStyle = document.createElement('style');
+          androidInteractionStyle.id = 'relife-android-interaction';
+          androidInteractionStyle.textContent = `
+            * { -webkit-tap-highlight-color: transparent; }
+            button:focus:not(:focus-visible),
+            a:focus:not(:focus-visible),
+            [role="button"]:focus:not(:focus-visible) { outline: none !important; }
+          `;
+          document.head?.appendChild(androidInteractionStyle);
           const originalFetch = window.fetch.bind(window);
+          const pendingNativeAgent = new Map();
+          const finishNativeAgent = (callbackId, result) => {
+            const pending = pendingNativeAgent.get(callbackId);
+            if (!pending) return;
+            pendingNativeAgent.delete(callbackId);
+            clearTimeout(pending.timeout);
+            pending.resolve(result && typeof result === 'object' ? result : { error: 'INVALID_NATIVE_RESULT' });
+          };
+          window.__RELIFE_NATIVE_AGENT_RESULT__ = finishNativeAgent;
+          const runNativeAgent = command => new Promise(resolve => {
+            const callbackId = typeof crypto?.randomUUID === 'function'
+              ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36);
+            const timeout = setTimeout(
+              () => finishNativeAgent(callbackId, { error: 'USER_CONFIRMATION_TIMEOUT' }),
+              120000
+            );
+            pendingNativeAgent.set(callbackId, { resolve, timeout });
+            try {
+              const raw = nativeBridge.agent(bridgeToken, JSON.stringify({ ...command, callback_id: callbackId }));
+              const result = JSON.parse(String(raw || '{}'));
+              if (result.status !== 'AWAITING_USER_CONFIRMATION') finishNativeAgent(callbackId, result);
+            } catch (_) {
+              finishNativeAgent(callbackId, { error: 'INVALID_NATIVE_RESPONSE' });
+            }
+          });
           const cacheable = path => [
             '/api/users/me', '/api/records', '/api/news', '/api/fact',
             '/api/recycling/nearby', '/api/weather/header', '/api/agent/conversations'
@@ -67,12 +101,20 @@ public final class OfflineBridgeScript {
                 const rawBody = init.body || (request && await request.clone().text()) || '';
                 const parsed = JSON.parse(rawBody || '{}');
                 const message = String(parsed.message || '').trim();
-                if (message.startsWith('/device ')) {
-                  const command = message.slice('/device '.length).trim();
-                  const nativeResult = nativeBridge.agent(bridgeToken, command);
+                if (message === '/device permissions') {
+                  const opened = nativeBridge.openAgentPermissions?.(bridgeToken) || false;
                   return new Response(JSON.stringify({
                     status: 'complete',
-                    message: '手機沙箱 Agent：' + nativeResult,
+                    message: opened ? '已打开 Android Agent 权限设置。' : '无法打开 Agent 权限设置。',
+                    points: 0
+                  }), { status: opened ? 200 : 403, headers: { 'Content-Type': 'application/json' } });
+                }
+                if (message.startsWith('/device ')) {
+                  const command = message.slice('/device '.length).trim();
+                  const nativeResult = await runNativeAgent(JSON.parse(command));
+                  return new Response(JSON.stringify({
+                    status: 'complete',
+                    message: '手機沙箱 Agent：' + JSON.stringify(nativeResult),
                     points: 0
                   }), { status: 200, headers: { 'Content-Type': 'application/json' } });
                 }
@@ -160,8 +202,43 @@ public final class OfflineBridgeScript {
             fb.__RELIFE_OFFLINE_ADAPTER__ = true;
             return true;
           };
+          const installAgentPhoneAdapter = () => {
+            const original = window.processAgentPayload;
+            if (typeof original !== 'function') return false;
+            if (original.__RELIFE_PHONE_ADAPTER__) return true;
+            const wrapped = async (payload, depth = 0) => {
+              if (payload?.status !== 'requires_action' || payload?.action?.type !== 'get_user_location') {
+                return original(payload, depth);
+              }
+              const originalResolver = window.resolveWeatherCoordinates;
+              const nativeResolver = async () => {
+                const result = await runNativeAgent({ tool: 'current_location' });
+                const latitude = Number(result?.latitude);
+                const longitude = Number(result?.longitude);
+                return Number.isFinite(latitude) && Number.isFinite(longitude)
+                  ? { latitude, longitude } : null;
+              };
+              window.resolveWeatherCoordinates = nativeResolver;
+              try {
+                return await original(payload, depth);
+              } finally {
+                if (window.resolveWeatherCoordinates === nativeResolver) {
+                  window.resolveWeatherCoordinates = originalResolver;
+                }
+              }
+            };
+            wrapped.__RELIFE_PHONE_ADAPTER__ = true;
+            window.processAgentPayload = wrapped;
+            return true;
+          };
           const timer = setInterval(() => { if (installFbAdapters()) clearInterval(timer); }, 100);
+          let agentAdapterAttempts = 0;
+          const agentAdapterTimer = setInterval(() => {
+            agentAdapterAttempts += 1;
+            if (installAgentPhoneAdapter() || agentAdapterAttempts >= 300) clearInterval(agentAdapterTimer);
+          }, 100);
           installFbAdapters();
+          installAgentPhoneAdapter();
           window.addEventListener('online', () => { try { nativeBridge.syncNow?.(bridgeToken); } catch (_) {} });
         })();
         """;

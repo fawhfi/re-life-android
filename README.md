@@ -1,6 +1,8 @@
 # Re-Life Android 容器
 
-這個目錄是 `../rel` FastAPI + 原生 JavaScript Web App 的 Android WebView 容器。建置時會把目前的 `../rel/static` 與主要頁面複製到 APK 的 assets，因此首次開啟、沒有網路時仍能顯示已打包的 UI；恢復網路後 WebView 會回到 `REL_SERVER_URL` 的同源伺服器。
+這個目錄是 Re-Life FastAPI + 原生 JavaScript Web App 的 Android WebView 容器。Android 專案內已提交一份版本化 Web 快照到 `app/src/main/assets/web`，CI 不需要相鄰的 `../rel` 倉庫；首次開啟或沒有網路時仍能顯示完整的既有 Web UI。線上頁面的 `/static/*` 會先取得伺服器目前版本（保留 `?v=` 版本參數）；網路失敗、HTTP 錯誤，或 CSS/JS 回傳錯誤 MIME（例如 HTML）時才由 APK 快照回退，避免裸 HTML，同時避免新 HTML 混載舊版 JS/CSS。
+
+Android 層不另建一套主畫面或導航；使用者看到的仍是原有 Web UI。更新網站後，如需把新版 UI 帶入下一個 APK，應明確更新 `app/src/main/assets/web/templates` 與 `app/src/main/assets/web/static` 的快照並重新建置。
 
 ## 建置
 
@@ -21,7 +23,7 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 
 產物位於 `app/build/outputs/apk/debug/app-debug.apk`。正式版本建議在 CI 注入正式 HTTPS 網址與簽署設定；不要把測試端點或憑證寫死在原始碼。
 
-如果未配置 Play Cloud project number、challenge endpoint，或伺服器尚未完成 token 驗證，Android 仍允許離線瀏覽与低风险资料同步，但奖励兑换/证明交换会返回 `403 INTEGRITY_REQUIRED`，不会降级为不安全流程。
+如果未配置 Play Cloud project number、challenge endpoint，或客戶端無法取得 token，Android 仍允許離線瀏覽與低風險資料同步，但獎勵兌換/證明交換會在送出前回傳 `403 INTEGRITY_REQUIRED`。若客戶端已取得 token、伺服器卻沒有解碼及驗證，Android 無法偵測這項後端漏驗；因此伺服器驗證仍是正式上線前置，不能由客戶端降級替代。
 
 ## APK 完整性與 Root 威脅
 
@@ -44,14 +46,18 @@ Get-FileHash .\app\build\outputs\apk\release\app-release.apk -Algorithm SHA256
 
 ## 手機端 Agent 沙箱
 
-主畫面的 ReAgent 輸入 `/device {JSON}` 時，會直接呼叫本機工具，例如：
+主畫面的 ReAgent 輸入 `/device permissions` 可開啟 Android Agent 權限對話框；所有 capability 預設關閉，使用者可逐項開啟或撤銷。輸入 `/device {JSON}` 時，才會呼叫已獲授權的本機工具，例如：
 
 ```text
 /device {"tool":"write_text","path":"notes/today.txt","text":"整理回收清單"}
 /device {"tool":"read_text","path":"notes/today.txt"}
+/device {"tool":"current_location"}
+/device {"tool":"take_photo"}
+/device {"tool":"share_text","text":"今天的回收清單"}
+/device {"tool":"open_url","url":"https://www.relifeapp.com"}
 ```
 
-工具只在 App 私有的 `files/sandbox` 目錄執行，不提供 shell、通訊錄、其他 App 檔案、麥克風或背景位置追蹤。讀檔、寫檔、刪檔、裝置資訊是分開的 capability，預設全拒絕；從 Activity 選單「Agent 權限」逐項授權或撤銷。所有呼叫只記錄時間、工具名稱和結果類別，不記錄檔案內容。
+工具只在 App 私有的 `files/sandbox` 目錄執行，不提供 shell、通訊錄、其他 App 檔案、麥克風或背景位置追蹤。讀檔、寫檔、刪檔、裝置資訊、定位、相機、系統分享與開啟 HTTPS 連結分別受獨立 capability 控制；未授權時回傳 `CAPABILITY_DENIED`。定位與相機還需要 Android 系統權限，且定位、相機、分享與外部連結每次執行前都會再次要求使用者確認。確認後的成功或拒絕結果會以 request-id 回送到現有 ReAgent 對話；伺服器 Agent 的 `get_user_location` approval 也會經過同一個原生 `LOCATION` capability。相機照片只保存到 App 私有沙箱。所有呼叫只記錄時間、工具名稱和結果類別，不記錄檔案內容。
 
 ## 安全注意事項
 

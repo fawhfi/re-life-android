@@ -22,15 +22,25 @@ public final class SandboxAgent {
     private static final String AUDIT = "sandbox-audit.log";
     private SandboxAgent() {}
 
+    /** Returns whether the named capability was explicitly granted by this app user. */
     public static boolean isGranted(Context context, String capability) {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(capability, false);
     }
 
+    /** Persists one capability grant and records the permission change in the local audit log. */
     public static void setGranted(Context context, String capability, boolean granted) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(capability, granted).apply();
         audit(context, "permission:" + capability + "=" + granted);
     }
 
+    /** Records only a sanitized tool name and result category, never tool payload data. */
+    public static void auditExternalTool(Context context, String tool, String resultCategory) {
+        String safeTool = tool == null ? "unknown" : tool.replaceAll("[^a-z0-9_/-]", "");
+        String safeResult = resultCategory == null ? "unknown" : resultCategory.replaceAll("[^a-z0-9_/-]", "");
+        audit(context, safeTool + "=" + safeResult);
+    }
+
+    /** Executes one JSON command after capability and private-directory confinement checks. */
     public static String execute(Context context, String command) {
         JSONObject result = new JSONObject();
         String tool = "";
@@ -69,6 +79,9 @@ public final class SandboxAgent {
                     result.put("manufacturer", Build.MANUFACTURER);
                     result.put("model", Build.MODEL);
                     result.put("android", Build.VERSION.RELEASE);
+                }
+                case "current_location", "take_photo", "share_text", "open_url" -> {
+                    return error("NATIVE_CONFIRMATION_REQUIRED");
                 }
                 default -> { return error("UNKNOWN_TOOL"); }
             }

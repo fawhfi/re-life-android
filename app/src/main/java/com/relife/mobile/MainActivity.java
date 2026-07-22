@@ -5,10 +5,12 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.location.Location;
+import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Bundle;
-import android.view.Menu;
-import android.view.MenuItem;
+import android.provider.MediaStore;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ServiceWorkerClient;
@@ -27,6 +29,8 @@ import androidx.activity.OnBackPressedCallback;
 import com.relife.mobile.offline.OfflineQueueStore;
 import com.relife.mobile.offline.SyncScheduler;
 import com.relife.mobile.sandbox.SandboxAgent;
+import com.relife.mobile.sandbox.SandboxCapability;
+import com.relife.mobile.sandbox.SandboxPolicy;
 
 import org.json.JSONObject;
 import org.json.JSONException;
@@ -34,6 +38,8 @@ import org.json.JSONException;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
@@ -41,6 +47,7 @@ import java.util.UUID;
 
 public final class MainActivity extends ComponentActivity {
     private WebView webView;
+    private WebAssetInterceptor assetInterceptor;
     private OfflineQueueStore offlineStore;
     private boolean offlinePageShown;
     private boolean mainPageStarted;
@@ -49,6 +56,9 @@ public final class MainActivity extends ComponentActivity {
     private android.webkit.GeolocationPermissions.Callback pendingGeolocationCallback;
     private final String bridgeToken = UUID.randomUUID().toString();
     private PlayIntegrityClient playIntegrityClient;
+    private String pendingAgentCapability;
+    private String pendingAgentCameraCallback;
+    private AlertDialog pendingAgentDialog;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -86,6 +96,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void configureWebView() {
+        assetInterceptor = new WebAssetInterceptor(this, BuildConfig.REL_SERVER_URL);
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -107,31 +118,270 @@ public final class MainActivity extends ComponentActivity {
         });
     }
 
-    @Override public boolean onCreateOptionsMenu(Menu menu) {
-        menu.add("Agent 權限").setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
-        return true;
-    }
-
-    @Override public boolean onOptionsItemSelected(MenuItem item) {
-        if ("Agent 權限".contentEquals(item.getTitle())) {
-            showAgentPermissions();
-            return true;
-        }
-        return super.onOptionsItemSelected(item);
-    }
-
     private void showAgentPermissions() {
-        String[] labels = {"讀取 App 沙箱檔案", "寫入 App 沙箱檔案", "查看裝置基本資訊"};
-        String[] keys = {"READ_FILES", "WRITE_FILES", "DEVICE_INFO"};
+        String[] labels = {
+                "读取 App 沙箱文件", "写入 App 沙箱文件", "查看设备基本信息",
+                "读取当前位置", "启动相机", "打开系统分享", "打开 HTTPS 链接"
+        };
+        String[] keys = {
+                "READ_FILES", "WRITE_FILES", "DEVICE_INFO", "LOCATION", "CAMERA", "SHARE", "OPEN_LINK"
+        };
         boolean[] checked = new boolean[keys.length];
         for (int i = 0; i < keys.length; i++) checked[i] = SandboxAgent.isGranted(this, keys[i]);
         new AlertDialog.Builder(this)
-                .setTitle("手機端 Agent 權限")
+                .setTitle("手机 Agent 权限")
                 .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) ->
-                        SandboxAgent.setGranted(this, keys[which], isChecked))
-                .setMessage("Agent 永遠只能存取本 App 私有 sandbox 目錄；不提供 shell、通訊錄或其他 App 資料權限。")
+                        changeAgentCapability(keys[which], isChecked))
                 .setPositiveButton("完成", null)
                 .show();
+    }
+
+    private void changeAgentCapability(String capability, boolean granted) {
+        if (!granted) {
+            SandboxAgent.setGranted(this, capability, false);
+            return;
+        }
+        if ("CAMERA".equals(capability)
+                && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            pendingAgentCapability = capability;
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, 744);
+            return;
+        }
+        if ("LOCATION".equals(capability)
+                && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
+                && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            pendingAgentCapability = capability;
+            requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION}, 745);
+            return;
+        }
+        SandboxAgent.setGranted(this, capability, true);
+    }
+
+    private String runDeviceAgent(String command) {
+        try {
+            JSONObject input = new JSONObject(command == null ? "{}" : command);
+            String tool = input.optString("tool", "").trim();
+            String callbackId = input.optString("callback_id", "").trim();
+            SandboxCapability required = SandboxPolicy.requiredCapability(tool);
+            if (required == null) {
+                return "{\"error\":\"UNKNOWN_TOOL\"}";
+            }
+            if (!SandboxAgent.isGranted(this, required.name())) {
+                return "{\"error\":\"CAPABILITY_DENIED\",\"required\":\"" + required.name() + "\"}";
+            }
+            switch (tool) {
+                case "current_location" -> {
+                    if (!validCallbackId(callbackId)) return "{\"error\":\"CALLBACK_REQUIRED\"}";
+                    runOnUiThread(() -> confirmAgentAction(
+                            "允许 Agent 读取当前位置？",
+                            "位置只会返回当前 ReAgent 请求。",
+                            callbackId,
+                            tool,
+                            () -> readCurrentLocation(callbackId)));
+                }
+                case "take_photo" -> {
+                    if (!validCallbackId(callbackId)) return "{\"error\":\"CALLBACK_REQUIRED\"}";
+                    runOnUiThread(() -> confirmAgentAction(
+                            "允许 Agent 启动相机？",
+                            "你需要在系统相机中亲自拍摄并确认。照片只保存到 App 私有沙箱。",
+                            callbackId,
+                            tool,
+                            () -> launchAgentCamera(callbackId)));
+                }
+                case "share_text" -> {
+                    String text = input.optString("text", "");
+                    if (text.isBlank() || text.length() > 10_000) {
+                        return "{\"error\":\"INVALID_SHARE_TEXT\"}";
+                    } else if (!validCallbackId(callbackId)) {
+                        return "{\"error\":\"CALLBACK_REQUIRED\"}";
+                    } else {
+                        runOnUiThread(() -> confirmAgentAction(
+                                "允许 Agent 打开分享面板？", text, callbackId, tool,
+                                () -> shareAgentText(callbackId, text)));
+                    }
+                }
+                case "open_url" -> {
+                    Uri uri = Uri.parse(input.optString("url", ""));
+                    if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) {
+                        return "{\"error\":\"HTTPS_URL_REQUIRED\"}";
+                    } else if (!validCallbackId(callbackId)) {
+                        return "{\"error\":\"CALLBACK_REQUIRED\"}";
+                    } else {
+                        runOnUiThread(() -> confirmAgentAction(
+                                "允许 Agent 打开链接？", uri.toString(), callbackId, tool,
+                                () -> openAgentUrl(callbackId, uri)));
+                    }
+                }
+                default -> { return SandboxAgent.execute(this, command); }
+            }
+            return "{\"status\":\"AWAITING_USER_CONFIRMATION\",\"callback_id\":"
+                    + JSONObject.quote(callbackId) + "}";
+        } catch (Exception ignored) {
+            return "{\"error\":\"INVALID_COMMAND\"}";
+        }
+    }
+
+    private void confirmAgentAction(
+            String title,
+            String message,
+            String callbackId,
+            String tool,
+            Runnable action
+    ) {
+        if (pendingAgentDialog != null && pendingAgentDialog.isShowing()) {
+            notifyAgentError(callbackId, "TOOL_BUSY", "另一个 Agent 操作正在等待确认");
+            SandboxAgent.auditExternalTool(this, tool, "busy");
+            return;
+        }
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setNegativeButton("拒绝", (ignored, which) -> {
+                    notifyAgentError(callbackId, "USER_DENIED", "Agent 操作已拒绝");
+                    SandboxAgent.auditExternalTool(this, tool, "denied");
+                })
+                .setPositiveButton("允许一次", (ignored, which) -> action.run())
+                .create();
+        dialog.setOnDismissListener(ignored -> {
+            if (pendingAgentDialog == dialog) pendingAgentDialog = null;
+        });
+        pendingAgentDialog = dialog;
+        dialog.show();
+    }
+
+    private void readCurrentLocation(String callbackId) {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+                && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            notifyAgentError(callbackId, "ANDROID_PERMISSION_DENIED", "Agent 缺少 Android 定位权限");
+            return;
+        }
+        try {
+            LocationManager manager = getSystemService(LocationManager.class);
+            Location newest = null;
+            if (manager != null) {
+                for (String provider : manager.getProviders(true)) {
+                    Location candidate = manager.getLastKnownLocation(provider);
+                    if (candidate != null && (newest == null || candidate.getTime() > newest.getTime())) newest = candidate;
+                }
+            }
+            if (newest == null) {
+                notifyAgentError(callbackId, "LOCATION_UNAVAILABLE", "当前位置暂不可用");
+                return;
+            }
+            JSONObject result = new JSONObject();
+            result.put("latitude", newest.getLatitude());
+            result.put("longitude", newest.getLongitude());
+            result.put("accuracy_m", newest.getAccuracy());
+            result.put("captured_at", newest.getTime());
+            notifyAgentResult(callbackId, result, "已取得当前位置");
+            SandboxAgent.auditExternalTool(this, "current_location", "ok");
+        } catch (Exception ignored) {
+            notifyAgentError(callbackId, "LOCATION_UNAVAILABLE", "当前位置暂不可用");
+        }
+    }
+
+    private void launchAgentCamera(String callbackId) {
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            notifyAgentError(callbackId, "ANDROID_PERMISSION_DENIED", "Agent 缺少 Android 相机权限");
+            return;
+        }
+        Intent camera = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        if (camera.resolveActivity(getPackageManager()) == null) {
+            notifyAgentError(callbackId, "CAMERA_UNAVAILABLE", "相机不可用");
+            return;
+        }
+        pendingAgentCameraCallback = callbackId;
+        try {
+            startActivityForResult(camera, 743);
+        } catch (RuntimeException ignored) {
+            pendingAgentCameraCallback = null;
+            notifyAgentError(callbackId, "CAMERA_UNAVAILABLE", "相机不可用");
+        }
+    }
+
+    private void saveAgentPhoto(String callbackId, Intent data) {
+        Object raw = data == null || data.getExtras() == null ? null : data.getExtras().get("data");
+        if (!(raw instanceof Bitmap bitmap)) {
+            notifyAgentError(callbackId, "PHOTO_UNAVAILABLE", "没有取得照片");
+            return;
+        }
+        File directory = new File(getFilesDir(), "sandbox");
+        if (!directory.exists() && !directory.mkdirs()) {
+            notifyAgentError(callbackId, "PHOTO_SAVE_FAILED", "照片保存失败");
+            return;
+        }
+        File photo = new File(directory, "agent-photo-" + System.currentTimeMillis() + ".jpg");
+        try (FileOutputStream output = new FileOutputStream(photo)) {
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 90, output)) throw new IOException("compress failed");
+            JSONObject result = new JSONObject();
+            result.put("ok", true);
+            result.put("sandbox_file", photo.getName());
+            notifyAgentResult(callbackId, result, "照片已保存到 Agent 沙箱：" + photo.getName());
+            SandboxAgent.auditExternalTool(this, "take_photo", "ok");
+        } catch (Exception ignored) {
+            notifyAgentError(callbackId, "PHOTO_SAVE_FAILED", "照片保存失败");
+        }
+    }
+
+    private void shareAgentText(String callbackId, String text) {
+        Intent share = new Intent(Intent.ACTION_SEND);
+        share.setType("text/plain");
+        share.putExtra(Intent.EXTRA_TEXT, text);
+        try {
+            startActivity(Intent.createChooser(share, "选择分享方式"));
+            notifyAgentResult(callbackId, successResult("opened"), "已打开系统分享面板");
+            SandboxAgent.auditExternalTool(this, "share_text", "opened");
+        } catch (RuntimeException ignored) {
+            notifyAgentError(callbackId, "SHARE_UNAVAILABLE", "系统分享不可用");
+            SandboxAgent.auditExternalTool(this, "share_text", "error");
+        }
+    }
+
+    private void openAgentUrl(String callbackId, Uri uri) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+            notifyAgentResult(callbackId, successResult("opened"), "已打开链接");
+            SandboxAgent.auditExternalTool(this, "open_url", "opened");
+        } catch (RuntimeException ignored) {
+            notifyAgentError(callbackId, "LINK_UNAVAILABLE", "没有可打开该链接的 App");
+            SandboxAgent.auditExternalTool(this, "open_url", "error");
+        }
+    }
+
+    private void notifyAgentError(String callbackId, String code, String toastMessage) {
+        JSONObject result = new JSONObject();
+        try {
+            result.put("error", code);
+        } catch (JSONException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+        notifyAgentResult(callbackId, result, toastMessage);
+    }
+
+    private JSONObject successResult(String status) {
+        JSONObject result = new JSONObject();
+        try {
+            result.put("ok", true);
+            result.put("status", status);
+            return result;
+        } catch (JSONException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    private void notifyAgentResult(String callbackId, JSONObject result, String toastMessage) {
+        runOnUiThread(() -> {
+            android.widget.Toast.makeText(this, toastMessage, android.widget.Toast.LENGTH_LONG).show();
+            if (!validCallbackId(callbackId) || webView == null) return;
+            String safeResult = result.toString().replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
+            String script = "window.__RELIFE_NATIVE_AGENT_RESULT__ && "
+                    + "window.__RELIFE_NATIVE_AGENT_RESULT__(" + JSONObject.quote(callbackId) + "," + safeResult + ");";
+            webView.evaluateJavascript(script, null);
+        });
+    }
+
+    private static boolean validCallbackId(String value) {
+        return value != null && value.matches("[A-Za-z0-9_-]{8,128}");
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
@@ -142,44 +392,31 @@ public final class MainActivity extends ComponentActivity {
     private void showOfflinePage() {
         if (offlinePageShown) return;
         offlinePageShown = true;
-        try (InputStream stream = getAssets().open("templates/index.html")) {
+        try {
+            String html = OfflineHtmlComposer.compose(
+                    readAsset("web/templates/index.html"),
+                    readAsset("web/static/style.css"),
+                    readAsset("web/static/css/theme.css"),
+                    OfflineBridgeScript.SCRIPT.replace("__RELIFE_BRIDGE_TOKEN__", bridgeToken)
+            );
+            webView.loadDataWithBaseURL(BuildConfig.REL_SERVER_URL, html, "text/html", "UTF-8", BuildConfig.REL_SERVER_URL + "/");
+        } catch (IOException ignored) {
+            webView.loadData("<h1>Re-Life 暂时无法连接</h1><p>请恢复网络后重试。</p>", "text/html", "UTF-8");
+        }
+    }
+
+    private String readAsset(String path) throws IOException {
+        try (InputStream stream = getAssets().open(path)) {
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             byte[] chunk = new byte[8192];
             int count;
             while ((count = stream.read(chunk)) >= 0) output.write(chunk, 0, count);
-            byte[] bytes = output.toByteArray();
-            String html = new String(bytes, StandardCharsets.UTF_8);
-            html = html.replace("</head>", "<script>" + OfflineBridgeScript.SCRIPT.replace("__RELIFE_BRIDGE_TOKEN__", bridgeToken) + "</script></head>");
-            webView.loadDataWithBaseURL(BuildConfig.REL_SERVER_URL, html, "text/html", "UTF-8", BuildConfig.REL_SERVER_URL + "/");
-        } catch (IOException ignored) {
-            webView.loadData("<h1>Re-Life 暫時無法連線</h1><p>請恢復網路後重試。</p>", "text/html", "UTF-8");
+            return new String(output.toByteArray(), StandardCharsets.UTF_8);
         }
     }
 
     private WebResourceResponse intercept(String urlString, String method) {
-        Uri uri = Uri.parse(urlString);
-        Uri configured = Uri.parse(BuildConfig.REL_SERVER_URL);
-        if (uri.getHost() != null && !String.valueOf(configured.getHost()).equalsIgnoreCase(uri.getHost())) return null;
-        if (!"GET".equalsIgnoreCase(method)) return null;
-        String path = uri.getPath();
-        if (path == null || !path.startsWith("/static/")) return null;
-        String assetPath = path.substring(1);
-        try {
-            InputStream stream = getAssets().open(assetPath);
-            return new WebResourceResponse(mimeFor(assetPath), "UTF-8", stream);
-        } catch (IOException ignored) { return null; }
-    }
-
-    private static String mimeFor(String path) {
-        String lower = path.toLowerCase(Locale.ROOT);
-        if (lower.endsWith(".css")) return "text/css";
-        if (lower.endsWith(".js")) return "application/javascript";
-        if (lower.endsWith(".json")) return "application/json";
-        if (lower.endsWith(".png")) return "image/png";
-        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-        if (lower.endsWith(".svg")) return "image/svg+xml";
-        if (lower.endsWith(".woff2")) return "font/woff2";
-        return "application/octet-stream";
+        return assetInterceptor.intercept(urlString, method);
     }
 
     private final class RelifeWebViewClient extends WebViewClient {
@@ -247,6 +484,13 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == 743) {
+            String callbackId = pendingAgentCameraCallback;
+            pendingAgentCameraCallback = null;
+            if (resultCode == RESULT_OK) saveAgentPhoto(callbackId, data);
+            else notifyAgentError(callbackId, "USER_CANCELLED", "已取消拍照");
+            return;
+        }
         if (requestCode != 741 || FileCallbackHolder.callback == null) return;
         Uri result = resultCode == RESULT_OK && data != null ? data.getData() : null;
         FileCallbackHolder.callback.onReceiveValue(result == null ? null : new Uri[]{result});
@@ -255,6 +499,20 @@ public final class MainActivity extends ComponentActivity {
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 744 || requestCode == 745) {
+            boolean granted = false;
+            for (int grantResult : grantResults) granted |= grantResult == PackageManager.PERMISSION_GRANTED;
+            if (pendingAgentCapability != null) {
+                SandboxAgent.setGranted(this, pendingAgentCapability, granted);
+                android.widget.Toast.makeText(
+                        this,
+                        granted ? "Agent 权限已开启" : "Android 系统权限未授予",
+                        android.widget.Toast.LENGTH_LONG
+                ).show();
+            }
+            pendingAgentCapability = null;
+            return;
+        }
         if (requestCode != 742 || pendingGeolocationCallback == null) return;
         boolean granted = false;
         for (int grantResult : grantResults) granted |= grantResult == PackageManager.PERMISSION_GRANTED;
@@ -305,7 +563,12 @@ public final class MainActivity extends ComponentActivity {
         @JavascriptInterface public String cacheGet(String token, String key) {
             return authorized(token) && key != null ? offlineStore.cacheGet(cacheKey(token, key)) : null;
         }
-        @JavascriptInterface public String agent(String token, String command) { return authorized(token) ? SandboxAgent.execute(context, command) : "{\"error\":\"BRIDGE_UNAUTHORIZED\"}"; }
+        @JavascriptInterface public String agent(String token, String command) { return authorized(token) ? runDeviceAgent(command) : "{\"error\":\"BRIDGE_UNAUTHORIZED\"}"; }
+        @JavascriptInterface public boolean openAgentPermissions(String token) {
+            if (!authorized(token)) return false;
+            runOnUiThread(MainActivity.this::showAgentPermissions);
+            return true;
+        }
 
         private String sanitizeProfileBody(String body) {
             try {

@@ -4,5 +4,9 @@ package com.relife.mobile.sandbox;
 public enum SandboxCapability {
     READ_FILES,
     WRITE_FILES,
-    DEVICE_INFO
+    DEVICE_INFO,
+    LOCATION,
+    CAMERA,
+    SHARE,
+    OPEN_LINK
 }

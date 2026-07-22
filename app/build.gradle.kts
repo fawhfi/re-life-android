@@ -1,5 +1,3 @@
-import org.gradle.api.tasks.Sync
-
 plugins {
     id("com.android.application")
 }
@@ -53,22 +51,12 @@ android {
     }
 }
 
-val generatedRelAssets = layout.buildDirectory.dir("generated/relWebAssets")
-val syncRelWebAssets by tasks.registering(Sync::class) {
-    description = "Packages the current ../rel web UI for offline use."
-    into(generatedRelAssets)
-    from("../../rel/static") { into("static") }
-    from("../../rel/templates") {
-        include("index.html", "login.html", "register.html")
-        into("templates")
-    }
-}
-
-android.sourceSets.getByName("main").assets.srcDir(generatedRelAssets.get().asFile)
-tasks.named("preBuild").configure { dependsOn(syncRelWebAssets) }
-
 dependencies {
     implementation("androidx.activity:activity:1.10.1")
+    implementation("androidx.webkit:webkit:1.12.1")
     implementation("com.google.android.play:integrity:1.4.0")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }
