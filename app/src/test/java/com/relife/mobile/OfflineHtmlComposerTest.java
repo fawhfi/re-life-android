@@ -43,4 +43,23 @@ public class OfflineHtmlComposerTest {
         assertTrue(html.startsWith("<style id=\"relife-bundled-css\">"));
         assertTrue(html.contains("<script>bridge() </script><main>Re-Life</main>"));
     }
+
+    @Test
+    public void offlineDocumentDoesNotWaitForLinkedStylesheets() {
+        String html = OfflineHtmlComposer.compose(
+                "<html><head>"
+                        + "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
+                        + "<link href=\"https://fonts.googleapis.com/font.css\" rel=\"stylesheet\">"
+                        + "<link rel=\"stylesheet\" href=\"/static/style.css\">"
+                        + "<link rel=\"icon\" href=\"/favicon.png\">"
+                        + "</head><body></body></html>",
+                "body{}",
+                "",
+                ""
+        );
+
+        assertFalse(html.contains("rel=\"preconnect\""));
+        assertFalse(html.contains("rel=\"stylesheet\""));
+        assertTrue(html.contains("rel=\"icon\""));
+    }
 }

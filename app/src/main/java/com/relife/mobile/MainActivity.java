@@ -27,6 +27,7 @@ import android.webkit.WebViewClient;
 
 import androidx.activity.ComponentActivity;
 import androidx.activity.OnBackPressedCallback;
+import androidx.webkit.ScriptHandler;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
@@ -51,6 +52,8 @@ import java.util.Locale;
 import java.util.UUID;
 
 public final class MainActivity extends ComponentActivity {
+    private static final String RENDERING_PREFERENCES = "android-rendering";
+    private static final String HIGH_END_RENDERING = "high-end";
     private static final int REQUEST_FILE_CHOOSER = 741;
     private static final int REQUEST_GEOLOCATION = 742;
     private static final int REQUEST_AGENT_CAMERA = 743;
@@ -72,6 +75,7 @@ public final class MainActivity extends ComponentActivity {
     private String pendingAgentCameraCallback;
     private AlertDialog pendingAgentDialog;
     private PermissionRequest pendingWebCameraRequest;
+    private ScriptHandler documentStartScriptHandler;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -91,13 +95,12 @@ public final class MainActivity extends ComponentActivity {
             }
         });
         playIntegrityClient = new PlayIntegrityClient(this);
+        loadMainPage(state);
         if (NetworkState.isOnline(this)) {
             playIntegrityClient.requestToken(new PlayIntegrityClient.Callback() {
-                @Override public void onToken(String token) { loadMainPage(state); }
-                @Override public void onUnavailable(String reason) { loadMainPage(state); }
+                @Override public void onToken(String token) {}
+                @Override public void onUnavailable(String reason) {}
             });
-        } else {
-            loadMainPage(state);
         }
     }
 
@@ -137,7 +140,8 @@ public final class MainActivity extends ComponentActivity {
 
     private void installDocumentStartBridge() {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return;
-        WebViewCompat.addDocumentStartJavaScript(
+        if (documentStartScriptHandler != null) documentStartScriptHandler.remove();
+        documentStartScriptHandler = WebViewCompat.addDocumentStartJavaScript(
                 webView,
                 bridgeScript(),
                 Collections.singleton(configuredOrigin())
@@ -448,6 +452,10 @@ public final class MainActivity extends ComponentActivity {
     @Override protected void onDestroy() {
         denyPendingWebCameraRequest();
         if (pendingAgentDialog != null) pendingAgentDialog.dismiss();
+        if (documentStartScriptHandler != null) {
+            documentStartScriptHandler.remove();
+            documentStartScriptHandler = null;
+        }
         if (webView != null) {
             webView.removeJavascriptInterface("RelifeNative");
             webView.destroy();
@@ -464,7 +472,7 @@ public final class MainActivity extends ComponentActivity {
                     readAsset("web/templates/index.html"),
                     readAsset("web/static/style.css"),
                     readAsset("web/static/css/theme.css"),
-                    OfflineBridgeScript.SCRIPT.replace("__RELIFE_BRIDGE_TOKEN__", bridgeToken)
+                    bridgeScript()
             );
             webView.loadDataWithBaseURL(BuildConfig.REL_SERVER_URL, html, "text/html", "UTF-8", BuildConfig.REL_SERVER_URL + "/");
         } catch (IOException ignored) {
@@ -515,7 +523,11 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private String bridgeScript() {
-        return OfflineBridgeScript.SCRIPT.replace("__RELIFE_BRIDGE_TOKEN__", bridgeToken);
+        boolean highEnd = getSharedPreferences(RENDERING_PREFERENCES, MODE_PRIVATE)
+                .getBoolean(HIGH_END_RENDERING, false);
+        return OfflineBridgeScript.SCRIPT
+                .replace("__RELIFE_BRIDGE_TOKEN__", bridgeToken)
+                .replace("__RELIFE_HIGH_END__", Boolean.toString(highEnd));
     }
 
     private boolean isTrustedPage(String url) {
@@ -687,6 +699,26 @@ public final class MainActivity extends ComponentActivity {
         @JavascriptInterface public boolean openAgentPermissions(String token) {
             if (!authorized(token)) return false;
             runOnUiThread(MainActivity.this::showAgentPermissions);
+            return true;
+        }
+        @JavascriptInterface public boolean setHighEndRendering(String token, boolean enabled) {
+            if (!authorized(token)) return false;
+            boolean changed = getSharedPreferences(RENDERING_PREFERENCES, MODE_PRIVATE)
+                    .getBoolean(HIGH_END_RENDERING, false) != enabled;
+            getSharedPreferences(RENDERING_PREFERENCES, MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(HIGH_END_RENDERING, enabled)
+                    .apply();
+            if (changed) runOnUiThread(() -> {
+                if (webView == null) return;
+                installDocumentStartBridge();
+                if (offlinePageShown) {
+                    offlinePageShown = false;
+                    showOfflinePage();
+                } else {
+                    webView.reload();
+                }
+            });
             return true;
         }
         /** Performs one system-respecting tap haptic for an authorized app page. */

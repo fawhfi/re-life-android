@@ -10,13 +10,20 @@ public final class OfflineHtmlComposer {
      * content are escaped so they cannot terminate their wrapper element.
      */
     public static String compose(String html, String coreCss, String themeCss, String bridgeScript) {
-        String safeHtml = html == null ? "" : html;
+        String safeHtml = removeBlockingStyles(html == null ? "" : html);
         String styles = "<style id=\"relife-bundled-css\">"
                 + escapeStyle(coreCss) + "\n" + escapeStyle(themeCss) + "</style>";
         String script = "<script>" + escapeScript(bridgeScript) + "</script>";
         String injection = styles + script;
         if (safeHtml.contains("</head>")) return safeHtml.replace("</head>", injection + "</head>");
         return injection + safeHtml;
+    }
+
+    private static String removeBlockingStyles(String html) {
+        return html.replaceAll(
+                "(?is)<link\\b[^>]*\\brel\\s*=\\s*([\"'])(?:stylesheet|preconnect)\\1[^>]*>",
+                ""
+        );
     }
 
     private static String escapeStyle(String value) {

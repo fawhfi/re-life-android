@@ -24,11 +24,38 @@ public final class OfflineBridgeScript {
 
     public static final String SCRIPT = """
         (() => {
+          const highEnd = __RELIFE_HIGH_END__;
+          if (highEnd) {
+            const reducedMotion = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+            let performanceProfile = {
+              reducedMotion,
+              lowEnd: false,
+              motionEnabled: !reducedMotion
+            };
+            try {
+              Object.defineProperty(window, 'RELIFE_PERF', {
+                configurable: true,
+                get: () => performanceProfile,
+                set: value => {
+                  const reportedReducedMotion = reducedMotion || !!value?.reducedMotion;
+                  performanceProfile = {
+                    ...(value && typeof value === 'object' ? value : {}),
+                    reducedMotion: reportedReducedMotion,
+                    lowEnd: false,
+                    motionEnabled: !reportedReducedMotion
+                  };
+                }
+              });
+            } catch (_) {}
+          }
           const prepareAndroidDocument = () => {
             const root = document.documentElement;
             if (!root) return false;
-            root.classList.add('relife-android', 'perf-lite');
+            root.classList.add('relife-android');
+            root.classList.toggle('perf-lite', !highEnd);
+            root.classList.toggle('relife-android-high-end', highEnd);
             window.__RELIFE_ANDROID__ = true;
+            window.__RELIFE_ANDROID_HIGH_END__ = highEnd;
             if (!document.getElementById('relife-android-interaction')) {
               const androidInteractionStyle = document.createElement('style');
               androidInteractionStyle.id = 'relife-android-interaction';
@@ -37,6 +64,19 @@ public final class OfflineBridgeScript {
                 button:focus:not(:focus-visible),
                 a:focus:not(:focus-visible),
                 [role="button"]:focus:not(:focus-visible) { outline: none !important; }
+                html.relife-backgrounded *,
+                html.relife-backgrounded *::before,
+                html.relife-backgrounded *::after {
+                  animation-play-state: paused !important;
+                }
+              `;
+              root.appendChild(androidInteractionStyle);
+            }
+            let androidLiteStyle = document.getElementById('relife-android-lite-rendering');
+            if (!androidLiteStyle) {
+              androidLiteStyle = document.createElement('style');
+              androidLiteStyle.id = 'relife-android-lite-rendering';
+              androidLiteStyle.textContent = `
                 html.relife-android { scroll-behavior: auto !important; }
                 html.relife-android *,
                 html.relife-android *::before,
@@ -90,13 +130,14 @@ public final class OfflineBridgeScript {
                 html.relife-android .empty-state-svg {
                   animation: none !important;
                 }
-                html.relife-backgrounded *,
-                html.relife-backgrounded *::before,
-                html.relife-backgrounded *::after {
-                  animation-play-state: paused !important;
-                }
               `;
-              root.appendChild(androidInteractionStyle);
+              root.appendChild(androidLiteStyle);
+            }
+            androidLiteStyle.disabled = highEnd;
+            if (highEnd && !window.__RELIFE_HIGH_END_PROFILE_CLEANUP__) {
+              const clearLiteProfile = () => root.classList.remove('perf-lite');
+              document.addEventListener('DOMContentLoaded', clearLiteProfile, { once: true });
+              window.__RELIFE_HIGH_END_PROFILE_CLEANUP__ = true;
             }
             return true;
           };
@@ -112,6 +153,53 @@ public final class OfflineBridgeScript {
           window.__RELIFE_NATIVE_BRIDGE__ = true;
           const bridgeToken = '__RELIFE_BRIDGE_TOKEN__';
           const originalFetch = window.fetch.bind(window);
+          const renderingLabel = () => {
+            const lang = String(document.documentElement?.lang || '').toLowerCase();
+            if (lang === 'zh-hk' || lang === 'zh-tw' || lang.includes('hant')) return '高畫質模式';
+            if (lang.startsWith('zh')) return '高画质模式';
+            return 'High quality';
+          };
+          const syncRenderingSetting = (button, label, enabled) => {
+            button.classList.toggle('is-active', enabled);
+            button.setAttribute('aria-checked', String(enabled));
+            button.setAttribute('aria-label', renderingLabel());
+            label.textContent = renderingLabel();
+          };
+          const installRenderingSetting = () => {
+            if (document.getElementById('relife-high-end-row')) return true;
+            const themeSelect = document.getElementById('theme-select');
+            const themeRow = themeSelect?.closest('.ai-row');
+            if (!themeRow?.parentNode) return false;
+            const row = document.createElement('div');
+            row.id = 'relife-high-end-row';
+            row.className = 'ai-row';
+            const label = document.createElement('span');
+            label.className = 'ai-row-label';
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'ai-switch';
+            button.setAttribute('role', 'switch');
+            syncRenderingSetting(button, label, highEnd);
+            button.addEventListener('click', () => {
+              const enabled = button.getAttribute('aria-checked') !== 'true';
+              syncRenderingSetting(button, label, enabled);
+              let accepted = false;
+              try { accepted = !!nativeBridge.setHighEndRendering?.(bridgeToken, enabled); } catch (_) {}
+              if (!accepted) syncRenderingSetting(button, label, highEnd);
+            });
+            row.replaceChildren(label, button);
+            themeRow.after(row);
+            new MutationObserver(() => syncRenderingSetting(button, label,
+              button.getAttribute('aria-checked') === 'true'))
+              .observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+            return true;
+          };
+          if (!installRenderingSetting()) {
+            const renderingSettingObserver = new MutationObserver(() => {
+              if (installRenderingSetting()) renderingSettingObserver.disconnect();
+            });
+            renderingSettingObserver.observe(document, { childList: true, subtree: true });
+          }
           const pendingNativeAgent = new Map();
           const finishNativeAgent = (callbackId, result) => {
             const pending = pendingNativeAgent.get(callbackId);
@@ -147,16 +235,6 @@ public final class OfflineBridgeScript {
           });
           const integrityAction = path => path === '/api/rewards/redeem' ? 'reward_redeem'
             : path === '/api/rewards/prove-swap' ? 'prove_swap' : '';
-          const waitForIntegrity = async action => {
-            if (!action || !nativeBridge.refreshPlayIntegrity?.(bridgeToken, action)) return false;
-            for (let attempt = 0; attempt < 60; attempt++) {
-              const value = nativeBridge.playIntegrityToken?.(bridgeToken) || '';
-              const currentAction = nativeBridge.playIntegrityAction?.(bridgeToken) || '';
-              if (value && currentAction === action) return true;
-              await new Promise(resolve => setTimeout(resolve, 100));
-            }
-            return false;
-          };
           window.fetch = async (input, init = {}) => {
             const request = input instanceof Request ? input : null;
             const method = String(init.method || request?.method || 'GET').toUpperCase();
@@ -164,10 +242,19 @@ public final class OfflineBridgeScript {
             const path = url.pathname + url.search;
             const protectedAction = method === 'POST' && url.origin === window.location.origin
               ? integrityAction(url.pathname) : '';
-            if (protectedAction && !(await waitForIntegrity(protectedAction))) {
-              return new Response(JSON.stringify({ error: 'INTEGRITY_REQUIRED' }), {
-                status: 403, headers: { 'Content-Type': 'application/json' }
-              });
+            let playIntegrity = '';
+            let playNonce = '';
+            let playAction = '';
+            if (protectedAction) {
+              playIntegrity = nativeBridge.playIntegrityToken?.(bridgeToken) || '';
+              playNonce = nativeBridge.playIntegrityNonce?.(bridgeToken) || '';
+              playAction = nativeBridge.playIntegrityAction?.(bridgeToken) || '';
+              if (playAction !== protectedAction) {
+                playIntegrity = '';
+                playNonce = '';
+                playAction = '';
+              }
+              try { nativeBridge.refreshPlayIntegrity?.(bridgeToken, protectedAction); } catch (_) {}
             }
             // Add integrity signals before any cache/network branch. Cached GETs
             // must carry the same headers when they reach the server.
@@ -176,13 +263,9 @@ public final class OfflineBridgeScript {
               init.headers = new Headers(init.headers || request?.headers || {});
               const integrity = nativeBridge.integrityHeader?.(bridgeToken) || '';
               if (integrity) init.headers.set('X-Re-Life-App-Integrity', integrity);
-              // Play Integrity tokens are one-use, action-bound credentials.
-              // Attach them only after waitForIntegrity() for a protected
-              // action; never replay them on ordinary GETs.
-              if (protectedAction) {
-                const playIntegrity = nativeBridge.playIntegrityToken?.(bridgeToken) || '';
-                const playNonce = nativeBridge.playIntegrityNonce?.(bridgeToken) || '';
-                const playAction = nativeBridge.playIntegrityAction?.(bridgeToken) || '';
+              // Integrity is currently an optional signal. A missing token
+              // must never prevent the existing online rewards flow.
+              if (protectedAction && playIntegrity) {
                 if (playIntegrity) init.headers.set('X-Re-Life-Play-Integrity', playIntegrity);
                 if (playNonce) init.headers.set('X-Re-Life-Play-Integrity-Nonce', playNonce);
                 if (playAction) init.headers.set('X-Re-Life-Play-Integrity-Action', playAction);
@@ -267,11 +350,11 @@ public final class OfflineBridgeScript {
               return { id: 'offline-' + id, image_url: item?.image_url || item?.photoUrl || '' };
             };
             if (originalSave) fb.saveUserData = async data => {
-              const safeData = profileOnly(data);
               if (!isOffline()) {
-                try { return await originalSave(safeData); }
+                try { return await originalSave(data); }
                 catch (error) { if (navigator.onLine) throw error; }
               }
+              const safeData = profileOnly(data);
               const id = queue('PATCH', '/api/users/me', json(safeData));
               if (!id) throw new Error('OFFLINE_QUEUE_UNAVAILABLE');
               return { ...(window.__relifeCachedUser || {}), ...safeData };
