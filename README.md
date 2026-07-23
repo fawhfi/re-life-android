@@ -25,6 +25,8 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 
 如果未配置 Play Cloud project number、challenge endpoint，或客戶端無法取得 token，Android 仍允許離線瀏覽與低風險資料同步，但獎勵兌換/證明交換會在送出前回傳 `403 INTEGRITY_REQUIRED`。若客戶端已取得 token、伺服器卻沒有解碼及驗證，Android 無法偵測這項後端漏驗；因此伺服器驗證仍是正式上線前置，不能由客戶端降級替代。
 
+GitHub Actions release 會從同名 Actions secrets 或 variables 讀取 `REL_PLAY_CLOUD_PROJECT_NUMBER` 與 `REL_PLAY_CHALLENGE_URL`；兩項都存在時才注入 APK。只配置其中一項會讓建置失敗，兩項皆未配置時建置會明確警告，且高價值操作維持 fail-closed。
+
 ## APK 完整性與 Root 威脅
 
 `AppIntegrity` 會在每次 Android API 請求附上 package、版本、簽名憑證 SHA-256 與 APK SHA-256。後端可用 `REL_ANDROID_CERT_SHA256`、`REL_ANDROID_APK_SHA256` 建立正式版本 allow-list，偵測重新打包、錯誤簽章、舊版或非官方 APK。建置 release 後可用以下方式取得 APK 雜湊：

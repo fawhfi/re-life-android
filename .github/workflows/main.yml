@@ -24,7 +24,21 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build Unsigned Release APK
-        run: ./gradlew assembleRelease --no-daemon
+        env:
+          REL_PLAY_CLOUD_PROJECT_NUMBER: ${{ secrets.REL_PLAY_CLOUD_PROJECT_NUMBER || vars.REL_PLAY_CLOUD_PROJECT_NUMBER }}
+          REL_PLAY_CHALLENGE_URL: ${{ secrets.REL_PLAY_CHALLENGE_URL || vars.REL_PLAY_CHALLENGE_URL }}
+        run: |
+          PLAY_INTEGRITY_ARGS=()
+          if [[ -n "$REL_PLAY_CLOUD_PROJECT_NUMBER" && -n "$REL_PLAY_CHALLENGE_URL" ]]; then
+            PLAY_INTEGRITY_ARGS+=("-PREL_PLAY_CLOUD_PROJECT_NUMBER=$REL_PLAY_CLOUD_PROJECT_NUMBER")
+            PLAY_INTEGRITY_ARGS+=("-PREL_PLAY_CHALLENGE_URL=$REL_PLAY_CHALLENGE_URL")
+          elif [[ -n "$REL_PLAY_CLOUD_PROJECT_NUMBER" || -n "$REL_PLAY_CHALLENGE_URL" ]]; then
+            echo "Play Integrity requires both REL_PLAY_CLOUD_PROJECT_NUMBER and REL_PLAY_CHALLENGE_URL." >&2
+            exit 1
+          else
+            echo "::warning::Play Integrity is not configured; protected reward actions will remain disabled."
+          fi
+          ./gradlew assembleRelease --no-daemon "${PLAY_INTEGRITY_ARGS[@]}"
 
       - name: Decode Keystore and Sign APK
         env:
