@@ -3,22 +3,114 @@ package com.relife.mobile;
 /** JS adapter injected into the existing web app; the web repo needs no Android-specific code. */
 public final class OfflineBridgeScript {
     private OfflineBridgeScript() {}
+
+    static final String STOP_MEDIA_SCRIPT = """
+        (() => {
+          const videos = [...document.querySelectorAll('video')];
+          const activeStreams = videos.map(video => video.srcObject).filter(Boolean);
+          try {
+            if (typeof closeCamera === 'function') closeCamera();
+          } catch (_) {}
+          activeStreams.forEach(stream => {
+            if (stream && typeof stream.getTracks === 'function') {
+              stream.getTracks().forEach(track => track.stop());
+            }
+          });
+          videos.forEach(video => {
+            video.srcObject = null;
+          });
+        })();
+        """;
+
     public static final String SCRIPT = """
         (() => {
+          const prepareAndroidDocument = () => {
+            const root = document.documentElement;
+            if (!root) return false;
+            root.classList.add('relife-android', 'perf-lite');
+            window.__RELIFE_ANDROID__ = true;
+            if (!document.getElementById('relife-android-interaction')) {
+              const androidInteractionStyle = document.createElement('style');
+              androidInteractionStyle.id = 'relife-android-interaction';
+              androidInteractionStyle.textContent = `
+                * { -webkit-tap-highlight-color: transparent; }
+                button:focus:not(:focus-visible),
+                a:focus:not(:focus-visible),
+                [role="button"]:focus:not(:focus-visible) { outline: none !important; }
+                html.relife-android { scroll-behavior: auto !important; }
+                html.relife-android *,
+                html.relife-android *::before,
+                html.relife-android *::after {
+                  backdrop-filter: none !important;
+                  -webkit-backdrop-filter: none !important;
+                }
+                html.relife-android .app::before,
+                html.relife-android .overall-bar-fill::after,
+                html.relife-android .criterion-bar-fill::after {
+                  display: none !important;
+                }
+                html.relife-android .login-card,
+                html.relife-android .card,
+                html.relife-android .fact-card,
+                html.relife-android .result-card,
+                html.relife-android .record-card,
+                html.relife-android .rewards-item,
+                html.relife-android .rewards-coupon,
+                html.relife-android .app-header,
+                html.relife-android .modal,
+                html.relife-android .weather-panel,
+                html.relife-android .upload-zone {
+                  box-shadow: var(--shadow-sm, 0 1px 3px rgba(0, 0, 0, 0.08)) !important;
+                  will-change: auto !important;
+                }
+                html.relife-android .app-header,
+                html.relife-android nav.nav,
+                html.relife-android .app-nav,
+                html.relife-android .login-card,
+                html.relife-android .card,
+                html.relife-android .fact-card,
+                html.relife-android .result-card,
+                html.relife-android .record-card,
+                html.relife-android .rewards-item,
+                html.relife-android .modal,
+                html.relife-android .weather-panel {
+                  background-color: var(--color-white, #ffffff) !important;
+                }
+                html.relife-android .upload-zone,
+                html.relife-android .rewards-coupon {
+                  background-color: var(--color-gray-50, #f8faf8) !important;
+                }
+                html.relife-android .record-card,
+                html.relife-android .rewards-item,
+                html.relife-android .rewards-coupon,
+                html.relife-android .news-item {
+                  content-visibility: auto;
+                  contain-intrinsic-size: auto 160px;
+                }
+                html.relife-android .empty-state-svg {
+                  animation: none !important;
+                }
+                html.relife-backgrounded *,
+                html.relife-backgrounded *::before,
+                html.relife-backgrounded *::after {
+                  animation-play-state: paused !important;
+                }
+              `;
+              root.appendChild(androidInteractionStyle);
+            }
+            return true;
+          };
+          if (!prepareAndroidDocument()) {
+            const observer = new MutationObserver(() => {
+              if (prepareAndroidDocument()) observer.disconnect();
+            });
+            observer.observe(document, { childList: true, subtree: true });
+          }
           if (window.__RELIFE_NATIVE_BRIDGE__) return;
           const nativeBridge = window.RelifeNative;
           if (!nativeBridge) return;
           window.__RELIFE_NATIVE_BRIDGE__ = true;
           const bridgeToken = '__RELIFE_BRIDGE_TOKEN__';
-          const androidInteractionStyle = document.createElement('style');
-          androidInteractionStyle.id = 'relife-android-interaction';
-          androidInteractionStyle.textContent = `
-            * { -webkit-tap-highlight-color: transparent; }
-            button:focus:not(:focus-visible),
-            a:focus:not(:focus-visible),
-            [role="button"]:focus:not(:focus-visible) { outline: none !important; }
-          `;
-          document.head?.appendChild(androidInteractionStyle);
           const originalFetch = window.fetch.bind(window);
           const pendingNativeAgent = new Map();
           const finishNativeAgent = (callbackId, result) => {
@@ -239,6 +331,17 @@ public final class OfflineBridgeScript {
           }, 100);
           installFbAdapters();
           installAgentPhoneAdapter();
+          let lastHapticAt = 0;
+          document.addEventListener('click', event => {
+            const target = event.target instanceof Element
+              ? event.target.closest('button, a, [role="button"], input[type="checkbox"], input[type="radio"]')
+              : null;
+            if (!target || target.matches(':disabled, [aria-disabled="true"]')) return;
+            const now = performance.now();
+            if (now - lastHapticAt < 80) return;
+            lastHapticAt = now;
+            try { nativeBridge.tapFeedback?.(bridgeToken); } catch (_) {}
+          }, { capture: true, passive: true });
           window.addEventListener('online', () => { try { nativeBridge.syncNow?.(bridgeToken); } catch (_) {} });
         })();
         """;

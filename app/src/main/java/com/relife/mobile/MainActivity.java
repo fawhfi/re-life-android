@@ -11,8 +11,10 @@ import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.view.HapticFeedbackConstants;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
 import android.webkit.ServiceWorkerClient;
 import android.webkit.ServiceWorkerController;
 import android.webkit.WebChromeClient;
@@ -25,6 +27,8 @@ import android.webkit.WebViewClient;
 
 import androidx.activity.ComponentActivity;
 import androidx.activity.OnBackPressedCallback;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
 
 import com.relife.mobile.offline.OfflineQueueStore;
 import com.relife.mobile.offline.SyncScheduler;
@@ -42,10 +46,18 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.Collections;
 import java.util.Locale;
 import java.util.UUID;
 
 public final class MainActivity extends ComponentActivity {
+    private static final int REQUEST_FILE_CHOOSER = 741;
+    private static final int REQUEST_GEOLOCATION = 742;
+    private static final int REQUEST_AGENT_CAMERA = 743;
+    private static final int REQUEST_AGENT_CAMERA_PERMISSION = 744;
+    private static final int REQUEST_AGENT_LOCATION_PERMISSION = 745;
+    private static final int REQUEST_WEB_CAMERA_PERMISSION = 746;
+
     private WebView webView;
     private WebAssetInterceptor assetInterceptor;
     private OfflineQueueStore offlineStore;
@@ -59,6 +71,7 @@ public final class MainActivity extends ComponentActivity {
     private String pendingAgentCapability;
     private String pendingAgentCameraCallback;
     private AlertDialog pendingAgentDialog;
+    private PermissionRequest pendingWebCameraRequest;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -97,6 +110,8 @@ public final class MainActivity extends ComponentActivity {
 
     private void configureWebView() {
         assetInterceptor = new WebAssetInterceptor(this, BuildConfig.REL_SERVER_URL);
+        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true);
+        webView.setHapticFeedbackEnabled(true);
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -106,9 +121,11 @@ public final class MainActivity extends ComponentActivity {
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         settings.setMediaPlaybackRequiresUserGesture(true);
+        settings.setOffscreenPreRaster(false);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         CookieManager.getInstance().setAcceptCookie(true);
         webView.addJavascriptInterface(new RelifeNativeBridge(this), "RelifeNative");
+        installDocumentStartBridge();
         webView.setWebViewClient(new RelifeWebViewClient());
         webView.setWebChromeClient(new RelifeChromeClient());
         ServiceWorkerController.getInstance().setServiceWorkerClient(new ServiceWorkerClient() {
@@ -116,6 +133,20 @@ public final class MainActivity extends ComponentActivity {
                 return intercept(request.getUrl().toString(), request.getMethod());
             }
         });
+    }
+
+    private void installDocumentStartBridge() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return;
+        WebViewCompat.addDocumentStartJavaScript(
+                webView,
+                bridgeScript(),
+                Collections.singleton(configuredOrigin())
+        );
+    }
+
+    private String configuredOrigin() {
+        Uri configured = Uri.parse(BuildConfig.REL_SERVER_URL);
+        return configured.getScheme() + "://" + configured.getAuthority();
     }
 
     private void showAgentPermissions() {
@@ -144,14 +175,14 @@ public final class MainActivity extends ComponentActivity {
         if ("CAMERA".equals(capability)
                 && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             pendingAgentCapability = capability;
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, 744);
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQUEST_AGENT_CAMERA_PERMISSION);
             return;
         }
         if ("LOCATION".equals(capability)
                 && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
                 && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             pendingAgentCapability = capability;
-            requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION}, 745);
+            requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION}, REQUEST_AGENT_LOCATION_PERMISSION);
             return;
         }
         SandboxAgent.setGranted(this, capability, true);
@@ -292,7 +323,7 @@ public final class MainActivity extends ComponentActivity {
         }
         pendingAgentCameraCallback = callbackId;
         try {
-            startActivityForResult(camera, 743);
+            startActivityForResult(camera, REQUEST_AGENT_CAMERA);
         } catch (RuntimeException ignored) {
             pendingAgentCameraCallback = null;
             notifyAgentError(callbackId, "CAMERA_UNAVAILABLE", "相机不可用");
@@ -389,6 +420,42 @@ public final class MainActivity extends ComponentActivity {
         super.onSaveInstanceState(out);
     }
 
+    @Override protected void onPause() {
+        if (webView != null) {
+            webView.evaluateJavascript(
+                    "document.documentElement?.classList.add('relife-backgrounded');"
+                            + OfflineBridgeScript.STOP_MEDIA_SCRIPT,
+                    null
+            );
+            webView.onPause();
+            webView.pauseTimers();
+        }
+        super.onPause();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (webView != null) {
+            webView.resumeTimers();
+            webView.onResume();
+            webView.evaluateJavascript(
+                    "document.documentElement?.classList.remove('relife-backgrounded');",
+                    null
+            );
+        }
+    }
+
+    @Override protected void onDestroy() {
+        denyPendingWebCameraRequest();
+        if (pendingAgentDialog != null) pendingAgentDialog.dismiss();
+        if (webView != null) {
+            webView.removeJavascriptInterface("RelifeNative");
+            webView.destroy();
+            webView = null;
+        }
+        super.onDestroy();
+    }
+
     private void showOfflinePage() {
         if (offlinePageShown) return;
         offlinePageShown = true;
@@ -444,8 +511,11 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void installOfflineBridge(WebView view) {
-        String script = OfflineBridgeScript.SCRIPT.replace("__RELIFE_BRIDGE_TOKEN__", bridgeToken);
-        view.evaluateJavascript(script, null);
+        view.evaluateJavascript(bridgeScript(), null);
+    }
+
+    private String bridgeScript() {
+        return OfflineBridgeScript.SCRIPT.replace("__RELIFE_BRIDGE_TOKEN__", bridgeToken);
     }
 
     private boolean isTrustedPage(String url) {
@@ -466,7 +536,17 @@ public final class MainActivity extends ComponentActivity {
             }
             pendingGeolocationOrigin = origin;
             pendingGeolocationCallback = callback;
-            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, 742);
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, REQUEST_GEOLOCATION);
+        }
+
+        @Override public void onPermissionRequest(PermissionRequest request) {
+            runOnUiThread(() -> handleWebPermissionRequest(request));
+        }
+
+        @Override public void onPermissionRequestCanceled(PermissionRequest request) {
+            runOnUiThread(() -> {
+                if (pendingWebCameraRequest == request) pendingWebCameraRequest = null;
+            });
         }
 
         @Override public boolean onShowFileChooser(WebView view, android.webkit.ValueCallback<Uri[]> callback, FileChooserParams params) {
@@ -474,24 +554,47 @@ public final class MainActivity extends ComponentActivity {
             Intent intent = params.createIntent();
             intent.setType("image/*");
             intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false);
-            startActivityForResult(intent, 741);
+            startActivityForResult(intent, REQUEST_FILE_CHOOSER);
             FileCallbackHolder.callback = callback;
             return true;
         }
+    }
+
+    private void handleWebPermissionRequest(PermissionRequest request) {
+        if (!WebPermissionPolicy.canGrantCamera(
+                BuildConfig.REL_SERVER_URL,
+                request.getOrigin().toString(),
+                request.getResources())) {
+            request.deny();
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            request.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+            return;
+        }
+        denyPendingWebCameraRequest();
+        pendingWebCameraRequest = request;
+        requestPermissions(new String[]{Manifest.permission.CAMERA}, REQUEST_WEB_CAMERA_PERMISSION);
+    }
+
+    private void denyPendingWebCameraRequest() {
+        PermissionRequest request = pendingWebCameraRequest;
+        pendingWebCameraRequest = null;
+        if (request != null) request.deny();
     }
 
     private static final class FileCallbackHolder { static android.webkit.ValueCallback<Uri[]> callback; }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == 743) {
+        if (requestCode == REQUEST_AGENT_CAMERA) {
             String callbackId = pendingAgentCameraCallback;
             pendingAgentCameraCallback = null;
             if (resultCode == RESULT_OK) saveAgentPhoto(callbackId, data);
             else notifyAgentError(callbackId, "USER_CANCELLED", "已取消拍照");
             return;
         }
-        if (requestCode != 741 || FileCallbackHolder.callback == null) return;
+        if (requestCode != REQUEST_FILE_CHOOSER || FileCallbackHolder.callback == null) return;
         Uri result = resultCode == RESULT_OK && data != null ? data.getData() : null;
         FileCallbackHolder.callback.onReceiveValue(result == null ? null : new Uri[]{result});
         FileCallbackHolder.callback = null;
@@ -499,7 +602,24 @@ public final class MainActivity extends ComponentActivity {
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == 744 || requestCode == 745) {
+        if (requestCode == REQUEST_WEB_CAMERA_PERMISSION) {
+            PermissionRequest request = pendingWebCameraRequest;
+            pendingWebCameraRequest = null;
+            boolean granted = grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            if (request != null) {
+                if (granted && WebPermissionPolicy.canGrantCamera(
+                        BuildConfig.REL_SERVER_URL,
+                        request.getOrigin().toString(),
+                        request.getResources())) {
+                    request.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+                } else {
+                    request.deny();
+                }
+            }
+            return;
+        }
+        if (requestCode == REQUEST_AGENT_CAMERA_PERMISSION || requestCode == REQUEST_AGENT_LOCATION_PERMISSION) {
             boolean granted = false;
             for (int grantResult : grantResults) granted |= grantResult == PackageManager.PERMISSION_GRANTED;
             if (pendingAgentCapability != null) {
@@ -513,7 +633,7 @@ public final class MainActivity extends ComponentActivity {
             pendingAgentCapability = null;
             return;
         }
-        if (requestCode != 742 || pendingGeolocationCallback == null) return;
+        if (requestCode != REQUEST_GEOLOCATION || pendingGeolocationCallback == null) return;
         boolean granted = false;
         for (int grantResult : grantResults) granted |= grantResult == PackageManager.PERMISSION_GRANTED;
         pendingGeolocationCallback.invoke(pendingGeolocationOrigin, granted, false);
@@ -568,6 +688,13 @@ public final class MainActivity extends ComponentActivity {
             if (!authorized(token)) return false;
             runOnUiThread(MainActivity.this::showAgentPermissions);
             return true;
+        }
+        /** Performs one system-respecting tap haptic for an authorized app page. */
+        @JavascriptInterface public void tapFeedback(String token) {
+            if (!authorized(token)) return;
+            runOnUiThread(() -> {
+                if (webView != null) webView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            });
         }
 
         private String sanitizeProfileBody(String body) {
